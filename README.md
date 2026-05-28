@@ -6,6 +6,7 @@ Development workspace for the Open Sovereign AI Cloud (OSAC) project. This repo 
 
 - **git**
 - **[gh CLI](https://cli.github.com/)**: Install and authenticate with `gh auth login` (required for fork workflow; use `--no-fork` if you only need read-only access)
+- **[podman](https://podman.io/)** and **[distrobox](https://distrobox.it/)**: Required for the containerized dev environment (see [Distrobox Dev Environment](#distrobox-dev-environment))
 
 ## Getting Started
 
@@ -51,6 +52,39 @@ This workspace provides a pre-configured AI-assisted development environment:
 | `.planning/config.json` | GSD workflow configuration (parallelization, verification, auto-advance) |
 | `skills/` | AI skills for Claude Code — EP generation, Jira management, bug fix workflows, demo recording |
 | `.gitignore` | Ignores cloned repos, `.planning/`, `.claude/`, credentials, editor files, and build artifacts |
+
+## Distrobox Dev Environment
+
+A containerized development environment is provided via [distrobox](https://distrobox.it/), packaging all required tools (Go, Node.js, buf, kubectl, kind, gh, jira, Claude Code) in a Fedora 42-based container. This gives you a reproducible environment without installing toolchains on your host.
+
+```bash
+# Build the image and enter the distrobox
+make enter
+
+# Or run Claude Code directly inside the distrobox
+make claude
+
+# Pass flags to Claude Code
+make claude ARGS="--resume"
+
+# Check status of image and distrobox
+make status
+
+# Rebuild from scratch
+make rebuild
+```
+
+The distrobox shares your home directory by default (override with `HOME_DIR`). All host files, SSH keys, and credentials are available inside the container.
+
+| Target | Description |
+|--------|-------------|
+| `make image` | Build the container image |
+| `make enter` | Enter the distrobox (creates on first run) |
+| `make claude` | Run Claude Code inside the distrobox |
+| `make stop` | Stop the running container |
+| `make rm` | Remove the distrobox |
+| `make rebuild` | Rebuild image from scratch and enter |
+| `make status` | Show image and distrobox status |
 
 ## Setup
 
