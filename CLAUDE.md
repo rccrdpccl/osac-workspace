@@ -10,7 +10,7 @@ OSAC (Open Sovereign AI Cloud) is a fulfillment system for provisioning Kubernet
 - **Read component CLAUDE.md first** before making changes in any component repo
 - **Never skip tenant isolation metadata** (`osac.openshift.io/tenant`, `osac.openshift.io/owner-reference` annotations) in new resources
 - **Always `buf lint` before committing** proto changes; regenerate with `buf generate`
-- **Fork-based workflow**: always push to `fork` remote, never to `origin`. PRs go from `fork/<branch>` to `origin/main`
+- **Fork-based workflow**: push to `origin` (your fork), PRs target `upstream/main`. Never push directly to `upstream`
 - When debugging Kubernetes operators, check for stale vendor directories and cached images before rebuilding
 
 ## Repository Structure
