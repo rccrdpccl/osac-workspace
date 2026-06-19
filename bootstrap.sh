@@ -3,10 +3,12 @@ set -euo pipefail
 
 GITHUB_ORG="osac-project"
 NO_FORK=false
+UPSTREAM_REMOTE="origin"
+FORK_REMOTE="fork"
 
 usage() {
   cat <<'EOF'
-Usage: ./bootstrap.sh [--no-fork]
+Usage: ./bootstrap.sh [--no-fork] [--upstream-remote-name=NAME] [--fork-remote-name=NAME]
 
 Sets up the OSAC workspace by cloning all component repos.
 
@@ -15,9 +17,14 @@ By default, each repo is forked to your GitHub account and cloned with:
   fork   = <your-username>/<repo>  (push target for feature branches)
 
 Options:
-  --no-fork    Clone directly from osac-project without forking.
-               Useful for read-only access or CI environments.
-  --help       Show this help message.
+  --upstream-remote-name=NAME  Name for the osac-project remote (default: origin).
+  --fork-remote-name=NAME      Name for your fork remote (default: fork).
+                               Example: --upstream-remote-name=upstream --fork-remote-name=origin
+                               gives the conventional layout where 'origin' is your fork.
+                               Existing repos are reconfigured automatically.
+  --no-fork                    Clone directly from osac-project without forking.
+                               Useful for read-only access or CI environments.
+  --help                       Show this help message.
 
 Prerequisites:
   - gh CLI installed and authenticated (gh auth login)
@@ -27,10 +34,17 @@ EOF
 for arg in "$@"; do
   case "$arg" in
     --no-fork) NO_FORK=true ;;
+    --upstream-remote-name=*) UPSTREAM_REMOTE="${arg#*=}" ;;
+    --fork-remote-name=*) FORK_REMOTE="${arg#*=}" ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $arg"; usage; exit 1 ;;
   esac
 done
+
+if [ "$UPSTREAM_REMOTE" = "$FORK_REMOTE" ]; then
+  echo "❌ Error: --upstream-remote-name and --fork-remote-name cannot be the same ('$UPSTREAM_REMOTE')."
+  exit 1
+fi
 
 # Verify gh CLI for fork workflow
 if [ "$NO_FORK" = false ]; then
@@ -73,7 +87,6 @@ confirm_continue() {
 ensure_fork_remote() {
   local repo="$1"
   local dir="$2"
-  # Ensure fork exists on GitHub, then verify it
   if ! gh repo fork "${GITHUB_ORG}/${repo}" --clone=false --default-branch-only; then
     if ! gh repo view "${GH_USER}/${repo}"; then
       echo "❌ Failed to fork ${GITHUB_ORG}/${repo}. Skipping fork remote."
@@ -82,8 +95,8 @@ ensure_fork_remote() {
   fi
   local url
   url=$(get_fork_url "$repo")
-  git -C "$dir" remote add fork "$url"
-  git -C "$dir" fetch fork
+  git -C "$dir" remote add "$FORK_REMOTE" "$url"
+  git -C "$dir" fetch "$FORK_REMOTE"
 }
 
 REPOS=(
@@ -104,9 +117,68 @@ UPDATE_WARNINGS=0
 is_expected_clone() {
   local dir="$1" repo="$2"
   local expected_suffix="${GITHUB_ORG}/${repo}"
-  local origin_url
-  origin_url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
-  [[ "${origin_url%.git}" == *"$expected_suffix" ]]
+  local url
+  for remote in "$UPSTREAM_REMOTE" origin upstream; do
+    url=$(git -C "$dir" remote get-url "$remote" 2>/dev/null) || continue
+    if [[ "${url%.git}" == *"$expected_suffix" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+reconfigure_remotes() {
+  local dir="$1" repo="$2"
+  local expected_suffix="${GITHUB_ORG}/${repo}"
+  local remotes url
+  remotes=$(git -C "$dir" remote)
+
+  local upstream_ok=false
+  url=$(git -C "$dir" remote get-url "$UPSTREAM_REMOTE" 2>/dev/null) || true
+  if [[ "${url%.git}" == *"$expected_suffix" ]]; then
+    upstream_ok=true
+  fi
+
+  # Find which remote currently points to the upstream org and which to the fork
+  local current_upstream_name="" current_fork_name=""
+  for r in $remotes; do
+    url=$(git -C "$dir" remote get-url "$r" 2>/dev/null) || continue
+    if [[ "${url%.git}" == *"$expected_suffix" ]]; then
+      current_upstream_name="$r"
+    elif [[ -n "${GH_USER:-}" ]] && [[ "${url%.git}" == *"${GH_USER}/${repo}" ]]; then
+      current_fork_name="$r"
+    fi
+  done
+
+  if $upstream_ok; then
+    if [ -z "$current_fork_name" ] || [ "$current_fork_name" = "$FORK_REMOTE" ]; then
+      return
+    fi
+    current_upstream_name=""
+  fi
+
+  if [ -z "$current_upstream_name" ] && [ -z "$current_fork_name" ]; then
+    return
+  fi
+
+  local msg=""
+  [ -n "$current_upstream_name" ] && msg="${current_upstream_name}→${UPSTREAM_REMOTE}"
+  if [ -n "$current_fork_name" ] && [ "$current_fork_name" != "$FORK_REMOTE" ]; then
+    [ -n "$msg" ] && msg="$msg, "
+    msg="${msg}${current_fork_name}→${FORK_REMOTE}"
+  fi
+  [ -n "$msg" ] && echo "   🔄 Reconfiguring remotes: ${msg}..."
+
+  # Use a temp name to avoid conflicts when swapping (e.g. origin↔fork)
+  if [ -n "$current_fork_name" ] && [ "$current_fork_name" != "$FORK_REMOTE" ]; then
+    git -C "$dir" remote rename "$current_fork_name" "_bootstrap_tmp_fork"
+  fi
+  if [ -n "$current_upstream_name" ] && [ "$current_upstream_name" != "$UPSTREAM_REMOTE" ]; then
+    git -C "$dir" remote rename "$current_upstream_name" "$UPSTREAM_REMOTE"
+  fi
+  if [ -n "$current_fork_name" ] && [ "$current_fork_name" != "$FORK_REMOTE" ]; then
+    git -C "$dir" remote rename "_bootstrap_tmp_fork" "$FORK_REMOTE"
+  fi
 }
 
 for entry in "${REPOS[@]}"; do
@@ -114,17 +186,18 @@ for entry in "${REPOS[@]}"; do
   dir="${entry#*:}"
   if [ -d "$dir" ] && is_expected_clone "$dir" "$repo"; then
     echo "📦 Updating $dir..."
-    if ! (cd "$dir" && git fetch origin); then
+    reconfigure_remotes "$dir" "$repo"
+    if ! (cd "$dir" && git fetch "$UPSTREAM_REMOTE"); then
       echo "⚠️  Fetch failed for $dir. Skipping update."
       UPDATE_WARNINGS=1
-    elif ! (cd "$dir" && git rebase origin/main --autostash); then
+    elif ! (cd "$dir" && git rebase "$UPSTREAM_REMOTE/main" --autostash); then
       (cd "$dir" && git rebase --abort 2>/dev/null || true)
       echo "⚠️  Rebase failed for $dir (likely local commits conflict with upstream)."
-      echo "   Skipping update — resolve manually with: cd $dir && git rebase origin/main"
+      echo "   Skipping update — resolve manually with: cd $dir && git rebase $UPSTREAM_REMOTE/main"
       UPDATE_WARNINGS=1
     fi
-    if [ "$NO_FORK" = false ] && ! git -C "$dir" remote get-url fork &>/dev/null; then
-      echo "🍴 Adding fork remote for existing repo $dir..."
+    if [ "$NO_FORK" = false ] && ! git -C "$dir" remote get-url "$FORK_REMOTE" &>/dev/null; then
+      echo "🍴 Adding $FORK_REMOTE remote for existing repo $dir..."
       ensure_fork_remote "$repo" "$dir" || confirm_continue "Fork remote for $repo failed."
     fi
   elif [ -d "$dir" ]; then
@@ -133,10 +206,10 @@ for entry in "${REPOS[@]}"; do
     UPDATE_WARNINGS=1
   else
     echo "📥 Cloning $repo into $dir..."
-    git clone "https://github.com/${GITHUB_ORG}/${repo}.git" "$dir"
+    git clone -o "$UPSTREAM_REMOTE" "https://github.com/${GITHUB_ORG}/${repo}.git" "$dir"
 
     if [ "$NO_FORK" = false ]; then
-      echo "🍴 Adding fork remote for $repo..."
+      echo "🍴 Adding $FORK_REMOTE remote for $repo..."
       ensure_fork_remote "$repo" "$dir" || confirm_continue "Fork remote for $repo failed."
     fi
   fi
@@ -223,12 +296,12 @@ for entry in "${REPOS[@]}"; do
   dir="${entry#*:}"
   if [ -d "$dir" ]; then
     branch=$(git -C "$dir" branch --show-current 2>/dev/null || echo "unknown")
-    origin_url=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "not set")
-    fork_url=$(git -C "$dir" remote get-url fork 2>/dev/null || echo "not set")
+    upstream_url=$(git -C "$dir" remote get-url "$UPSTREAM_REMOTE" 2>/dev/null || echo "not set")
+    fork_url=$(git -C "$dir" remote get-url "$FORK_REMOTE" 2>/dev/null || echo "not set")
     echo "   $dir (branch: $branch)"
-    echo "     origin: $origin_url"
+    echo "     $UPSTREAM_REMOTE: $upstream_url"
     if [ "$fork_url" != "not set" ]; then
-      echo "     fork:   $fork_url"
+      echo "     $FORK_REMOTE:   $fork_url"
     fi
   fi
 done
@@ -237,5 +310,5 @@ if [ "$NO_FORK" = true ]; then
   echo ""
   echo "💡 Cloned in read-only mode. To contribute, re-run without --no-fork"
   echo "   or add your fork manually:"
-  echo "   cd <repo> && git remote add fork \$(gh config get git_protocol | grep -q ssh && echo git@github.com: || echo https://github.com/)\$(gh api user -q .login)/<repo>.git"
+  echo "   cd <repo> && git remote add $FORK_REMOTE \$(gh config get git_protocol | grep -q ssh && echo git@github.com: || echo https://github.com/)\$(gh api user -q .login)/<repo>.git"
 fi
