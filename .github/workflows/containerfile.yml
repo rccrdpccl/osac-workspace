@@ -1,0 +1,50 @@
+name: Validate Distrobox env
+
+on:
+  pull_request:
+    paths:
+      - Containerfile
+      - tools/podman-wrapper.sh
+      - tools/test/distrobox-kind-smoke.sh
+
+permissions:
+  contents: read  # checkout only
+
+concurrency:
+  group: containerfile-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build Containerfile
+        run: docker build -t osac-dev-ci -f Containerfile .
+
+      - name: Verify tools are installed
+        run: |
+          docker run --rm osac-dev-ci sh -c '
+            set -e
+            go version
+            buf --version
+            kubectl version --client
+            kind version
+            jira version
+            grpcurl --version
+            ginkgo version
+            claude --version
+            echo "All tools verified"
+          '
+
+      - name: Verify podman wrapper is installed
+        run: |
+          docker run --rm osac-dev-ci sh -c '
+            set -e
+            test -x /usr/local/bin/podman
+            grep -q distrobox-host-exec /usr/local/bin/podman
+            echo "podman wrapper verified"
+          '
